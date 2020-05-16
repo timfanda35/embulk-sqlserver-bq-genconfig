@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strings"
 	"text/template"
 	"time"
 )
@@ -17,30 +18,44 @@ const SQL_QUERY = "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM INFORMATION_SC
 const OUTPUT_TEMPLATE = `
 in:
   type: sqlserver
-  host: {{"{{ env.IN_SOURCE_HOST }}"}}
-  user: {{"{{ env.IN_SOURCE_DB_USER }}"}}
-  password: {{"{{ env.IN_SOURCE_DB_PASS }}"}}
-  database: {{"{{ env.IN_SOURCE_DB }}"}}
-  table: {{"{{ env.IN_SOURCE_TABLE }}"}}
-  select: "*"
+  host: "{{"{{ env.IN_SOURCE_HOST }}"}}"
+  user: "{{"{{ env.IN_SOURCE_DB_USER }}"}}"
+  password: "{{"{{ env.IN_SOURCE_DB_PASS }}"}}"
+  database: "{{ .Database }}"
+  table: "{{ .Name }}"
+  select: "{{ .SelectColumns }}"
   column_options:
-  {{- range . }}
-  - {{ .InputDefine }}
+  {{- range .ColumnDefines }}
+    {{ .InputDefine }}
   {{- end }}
 out:
   type: bigquery
   auth_method: application_default
-  project: {{"{{ env.GCP_PROJECT_ID }}"}}
-  dataset: {{"{{ env.BQ_DATASET }}"}}
-  table:   {{"{{ env.BQ_TABLE }}"}}
+  project: "{{"{{ env.GCP_PROJECT_ID }}"}}"
+  dataset: "{{"{{ env.BQ_DATASET }}"}}"
+  table:   "{{ .Name }}"
   compression: GZIP
-  gcs_bucket: {{"{{ env.GCP_PROJECT_ID }}-embulk"}}
+  gcs_bucket: "{{"{{ env.GCP_PROJECT_ID }}-embulk"}}"
   auto_create_gcs_bucket: true
   column_options:
-  {{- range . }}
+  {{- range .ColumnDefines }}
   - {{ .OuputDefine }}
   {{- end }}
 `
+
+type TableSchema struct {
+	Name     string
+	Database		string
+	ColumnDefines []TableSchemaColumn
+}
+
+func (t TableSchema) SelectColumns() string {
+	cols := []string{}
+    for _, colDefine := range t.ColumnDefines {
+        cols = append(cols, colDefine.Name)
+    }
+	return strings.Join(cols, ", ")
+}
 
 type TableSchemaColumn struct {
 	Name     string
@@ -75,9 +90,9 @@ func (t TableSchemaColumn) OuputDefine() string {
 	case "datetime":
 		bqType = "DATETIME, format: '%Y-%m-%d %H:%M:%S'"
 	case "timestamp":
-		bqType = "timestamp"
+		bqType = "TIMESTAMP"
 	default:
-		bqType = "string"
+		bqType = "STRING"
 	}
 
 	return fmt.Sprintf("{name: %s, type: %s}", t.Name, bqType)
@@ -131,7 +146,7 @@ func parseRows(rows *sql.Rows) map[string][]TableSchemaColumn {
 	return tableSchemas
 }
 
-func output(tableSchemas map[string][]TableSchemaColumn) {
+func output(database string, tableSchemas map[string][]TableSchemaColumn) {
 	// output
 	outputDir := fmt.Sprintf("config-%s", time.Now().Format("20060102_1504"))
 	err := os.Mkdir(outputDir, os.ModePerm)
@@ -151,8 +166,9 @@ func output(tableSchemas map[string][]TableSchemaColumn) {
 			log.Fatal(err)
 		}
 
+		schema := TableSchema{Name: k, Database: database, ColumnDefines: v}
 		log.Printf(">>>> %s <<<<", k)
-		if err := tmpl.Execute(f, v); err != nil {
+		if err := tmpl.Execute(f, schema); err != nil {
 			f.Close()
 			log.Fatal(err)
 		}
@@ -176,7 +192,7 @@ func process(username, password, hostname, database string, port int) {
 	}
 	tableSchemas := parseRows(rows)
 
-	output(tableSchemas)
+	output(database, tableSchemas)
 
 	log.Printf("==> Done")
 }
